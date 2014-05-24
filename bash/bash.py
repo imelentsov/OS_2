@@ -132,7 +132,9 @@ def startElementsInit(tree):
 		except Exception:
 			pass
 	else:
-		# child
+		# child - root for all other processes (bash)
+		signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+		signal.signal(signal.SIGINT, signal.SIG_DFL)
 		waitingFor = 0
 		creatorPID = os.getpid()
 		os.setsid()
