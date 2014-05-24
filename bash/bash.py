@@ -35,8 +35,6 @@ class RRedirection(Redirection):
 
 class Element(object):
 	def run(self):
-		global waitingFor
-		waitingFor += 1
 		if self.pipe is not None:
 			pipeIn, pipeOut = os.pipe()
 			pid = os.fork()
@@ -55,9 +53,8 @@ class Element(object):
 			if pid:
 				# parent
 				try:
-					while waitingFor:
-						os.wait()
-						waitingFor -= 1
+					while True:
+						os.wait() # если потомков не осталось выбросит исключение
 				except Exception:
 					pass
 			else:
@@ -117,11 +114,10 @@ Group.grammar = "(", attr("elements", (Element, Elements)), ")", attr("redirecti
 Elements.grammar = [ (Element, Elements), None ]
 
 creatorPID = None
-waitingFor = 0
 
 # fork-нуться и стать лидером сессии
 def startElementsInit(tree):
-	global creatorPID, waitingFor
+	global creatorPID
 	pid = os.fork()
 	if pid:
 		# parent
@@ -135,7 +131,6 @@ def startElementsInit(tree):
 		# child - root for all other processes (bash)
 		signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 		signal.signal(signal.SIGINT, signal.SIG_DFL)
-		waitingFor = 0
 		creatorPID = os.getpid()
 		os.setsid()
 		tree.run()
