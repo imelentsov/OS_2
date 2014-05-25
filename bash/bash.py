@@ -11,7 +11,7 @@ from sys import stdin, stdout
 from pypeg2 import *
 from utils import *
 
-arg = re.compile("(?:\w|[-\"'/.])+")
+arg = re.compile("(?:\w|[-\"'/.\\\])+")
 filename = re.compile("(?:\w|\.|/)*(?:\w|\.)+")
 
 Direction = enum("LEFT", "RIGHT")
@@ -33,8 +33,17 @@ class RRedirection(Redirection):
 	def getDirection(self):
 		return Direction.RIGHT
 
-class Element(object):
+class ElementWithRedirection(object):
+	def getRedirections(self, direction):
+		return list(filter(lambda x: x.getDirection() == direction, [] if self.redirections is None else self.redirections))
+
+class Element(ElementWithRedirection):
+	current_pgrp = 0
+
 	def run(self):
+		if hasattr(self, "group"):
+			Element.current_pgrp = 0
+
 		if self.pipe is not None:
 			pipeIn, pipeOut = os.pipe()
 			pid = os.fork()
@@ -42,6 +51,8 @@ class Element(object):
 				# parent
 				os.close(pipeOut)
 				os.dup2(pipeIn, 0)
+				if not Element.current_pgrp:
+					Element.current_pgrp = pid
 				self.pipe.run()
 			else:
 				# child
@@ -54,26 +65,34 @@ class Element(object):
 				# parent
 				try:
 					while True:
-						os.wait() # если потомков не осталось выбросит исключение
+						os.wait() # если потомков не осталось выбросит исключение (Errno = -1)
 				except Exception:
 					pass
 			else:
 				# child
 				self.runNext()
 
+		if self.semicolon is not None:
+				Element.current_pgrp = 0
+
 	def runNext(self):
 		if hasattr(self, "group"):
-			self.group.run()
-		else: # if hasattr(self, "command"):
-			self.command.run()
+			self.group.redirections = self.redirections
+			self.group.run()			
+		elif hasattr(self, "command"):
+			while True: # жесть конечно, но иначе не знаю как контролировать что группа создана
+				try:
+					os.setpgid(0, Element.current_pgrp)
+					break
+				except:
+					pass
 
-class ElementWithRedirection(Element):
-	def getRedirections(self, direction):
-		return list(filter(lambda x: x.getDirection() == direction, self.redirections))
+			self.command.redirections = self.redirections
+			self.command.run()
 
 """ исполняемая команда """
 class Command(ElementWithRedirection):
-	grammar = attr("name", filename), attr("args", maybe_some(arg)), attr("redirections", maybe_some([LRedirection, RRedirection]))
+	grammar = attr("name", filename), attr("args", maybe_some(arg))
 
 	""" устанавливает перенаправления перед исполнением комманды """
 	def setCommandRedirections(self):
@@ -99,6 +118,20 @@ class Group(ElementWithRedirection):
 		# запустить subshell
 		subtree = Elements()
 		subtree += self.elements
+		# обработать перенаправление для группы, взять самый правый лист,
+		# если он представляет из себя первую комманду в череде конвейеров, то для < брать первый из них, для > брать последний
+		# если группа или команда, то просто прицепить перенаправления к ней, в начало списка перенаправлений
+		rightestElementR = rightestElementL = self.elements[-2] # последний элемент всегда None
+		while rightestElementR.pipe is not None:
+			rightestElementR = rightestElementR.pipe.piped[0]
+		temp = self.getRedirections(Direction.LEFT)
+		if rightestElementL.redirections is not None:
+			temp.extend(rightestElementL.redirections)
+		rightestElementL.redirections = temp
+		temp = self.getRedirections(Direction.RIGHT)
+		if rightestElementR.redirections is not None:
+			temp.extend(rightestElementR.redirections)
+		rightestElementR.redirections = temp
 		startElementsInit(subtree)
 		exit(0)
 
@@ -108,9 +141,10 @@ class Piped(Element):
 			if element is not None:
 				element.run()
 
-Element.grammar = [ attr("group", Group), attr("command", Command) ], attr("pipe", optional(Piped)), optional(";")
+#redirections = attr("redirections", maybe_some([LRedirection, RRedirection]))
+Element.grammar = [ attr("group", Group), attr("command", Command) ], attr("redirections", maybe_some([LRedirection, RRedirection])), attr("semicolon", optional(";")), attr("pipe", optional(Piped))
 Piped.grammar = '|', attr("piped", (Element, Elements))
-Group.grammar = "(", attr("elements", (Element, Elements)), ")", attr("redirections", maybe_some([LRedirection, RRedirection]))
+Group.grammar = "(", attr("elements", (Element, Elements)), ")"
 Elements.grammar = [ (Element, Elements), None ]
 
 creatorPID = None
@@ -162,6 +196,7 @@ def bash():
 			tree = parse(command, Elements)
 		except Exception as e:
 			print("Syntax error: {}".format(e))
+			continue
 		try:
 			startElementsInit(tree)
 		except Exception as e:
