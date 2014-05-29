@@ -11,7 +11,7 @@ from sys import stdin, stdout
 from pypeg2 import *
 from utils import *
 
-arg = re.compile("(?:\w|[-\"'/.\\\])+")
+arg = re.compile("(?:\w|[-\"'/.\\\,])+")
 filename = re.compile("(?:\w|\.|/)*(?:\w|\.)+")
 
 Direction = enum("LEFT", "RIGHT")
@@ -33,11 +33,7 @@ class RRedirection(Redirection):
 	def getDirection(self):
 		return Direction.RIGHT
 
-class ElementWithRedirection(object):
-	def getRedirections(self, direction):
-		return list(filter(lambda x: x.getDirection() == direction, [] if self.redirections is None else self.redirections))
-
-class Element(ElementWithRedirection):
+class Element(object):
 	current_pgrp = 0
 
 	def run(self):
@@ -77,7 +73,6 @@ class Element(ElementWithRedirection):
 
 	def runNext(self):
 		if hasattr(self, "group"):
-			self.group.redirections = self.redirections
 			self.group.run()			
 		elif hasattr(self, "command"):
 			while True: # жесть конечно, но иначе не знаю как контролировать что группа создана
@@ -86,13 +81,15 @@ class Element(ElementWithRedirection):
 					break
 				except:
 					pass
-
-			self.command.redirections = self.redirections
 			self.command.run()
+		else: #hasattr(self, "redirections")
+			self.redirections.run()
 
-""" исполняемая команда """
-class Command(ElementWithRedirection):
-	grammar = attr("name", filename), attr("args", maybe_some(arg))
+class ElementWithRedirection(Element):
+	grammar = attr("redirections", some([LRedirection, RRedirection]))
+	
+	def getRedirections(self, direction):
+		return list(filter(lambda x: x.getDirection() == direction, [] if self.redirections is None else self.redirections))
 
 	""" устанавливает перенаправления перед исполнением комманды """
 	def setCommandRedirections(self):
@@ -100,6 +97,13 @@ class Command(ElementWithRedirection):
 			os.dup2(os.open(fileIn.file, os.O_CREAT | os.O_RDONLY), 0)
 		for fileOut in self.getRedirections(Direction.RIGHT):
 			os.dup2(os.open(fileOut.file, os.O_CREAT | os.O_WRONLY), 1)
+
+	def run(self):
+		self.setCommandRedirections()
+
+""" исполняемая команда """
+class Command(ElementWithRedirection):
+	grammar = attr("name", filename), attr("args", maybe_some(arg)), attr("redirections", maybe_some([LRedirection, RRedirection]))
 
 	def run(self):
 		self.setCommandRedirections()
@@ -115,23 +119,10 @@ class Elements(List, Element):
 
 class Group(ElementWithRedirection):
 	def run(self):
+		self.setCommandRedirections()
 		# запустить subshell
 		subtree = Elements()
 		subtree += self.elements
-		# обработать перенаправление для группы, взять самый правый лист,
-		# если он представляет из себя первую комманду в череде конвейеров, то для < брать первый из них, для > брать последний
-		# если группа или команда, то просто прицепить перенаправления к ней, в начало списка перенаправлений
-		rightestElementR = rightestElementL = self.elements[-2] # последний элемент всегда None
-		while rightestElementR.pipe is not None:
-			rightestElementR = rightestElementR.pipe.piped[0]
-		temp = self.getRedirections(Direction.LEFT)
-		if rightestElementL.redirections is not None:
-			temp.extend(rightestElementL.redirections)
-		rightestElementL.redirections = temp
-		temp = self.getRedirections(Direction.RIGHT)
-		if rightestElementR.redirections is not None:
-			temp.extend(rightestElementR.redirections)
-		rightestElementR.redirections = temp
 		startElementsInit(subtree)
 		exit(0)
 
@@ -141,10 +132,9 @@ class Piped(Element):
 			if element is not None:
 				element.run()
 
-#redirections = attr("redirections", maybe_some([LRedirection, RRedirection]))
-Element.grammar = [ attr("group", Group), attr("command", Command) ], attr("redirections", maybe_some([LRedirection, RRedirection])), attr("semicolon", optional(";")), attr("pipe", optional(Piped))
+Element.grammar = [ attr("group", Group), attr("command", Command), attr("redirections", ElementWithRedirection) ], attr("semicolon", optional(";")), attr("pipe", optional(Piped))
 Piped.grammar = '|', attr("piped", (Element, Elements))
-Group.grammar = "(", attr("elements", (Element, Elements)), ")"
+Group.grammar = "(", attr("elements", (Element, Elements)), ")", attr("redirections", maybe_some([LRedirection, RRedirection]))
 Elements.grammar = [ (Element, Elements), None ]
 
 creatorPID = None
@@ -179,7 +169,10 @@ def sigchldHandler(signum, frame):
 def sigintHandler(signum, frame):
 	global creatorPID
 	if creatorPID is not None:
-		os.kill(creatorPID, signal.SIGINT)
+		try:
+			os.kill(creatorPID, signal.SIGINT)
+		except:
+			exit(0)
 	else:
 		exit(0)
 
